@@ -267,6 +267,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # 소스는 source/ 아래에 체크아웃하므로 워크스페이스 루트는 git 저장소가
+          # 아닙니다. gh가 대상 저장소를 추론할 수 없으므로 명시합니다.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.params.outputs.tag }}
           SOURCE_SHA: ${{ steps.params.outputs.ref }}
         run: |
