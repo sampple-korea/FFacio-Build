@@ -30,7 +30,7 @@ concurrency:
 
 env:
   SOURCE_REPO: sampple-korea/FFacio
-  EXPECTED_SIGNER_SHA256: e1344975a288ec785ab12841ca8719b2115eadf41ae6f6e7ab8770979b7fa2b9
+  EXPECTED_SIGNER_SHA256: 5f1d4fc485ef31fc88abb85a26d0dd73f497446a295f5cb690b5afb1963817f5
 
 jobs:
   build:
