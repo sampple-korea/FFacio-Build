@@ -1,0 +1,86 @@
+name: Watch the private source for new work
+
+# 비공개 소스 저장소(sampple-korea/FFacio)를 주기적으로 확인해서
+# 아직 빌드하지 않은 태그와 커밋이 있으면 빌드 워크플로를 실행합니다.
+#
+# 왜 비공개 저장소에서 직접 트리거하지 않는가:
+# 비공개 저장소의 Actions는 요금제 한도에 묶여 있어 릴레이 잡조차 실행되지
+# 않습니다. 이 저장소는 공개라서 Actions가 무료이므로, 감시도 여기서 합니다.
+#
+# 즉시 빌드가 필요하면 "Build and release FFacio APKs"를 수동 실행하세요.
+
+on:
+  schedule:
+    # 15분마다 확인합니다. GitHub 부하에 따라 실제 실행은 늦어질 수 있습니다.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ffacio-watch
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPO: sampple-korea/FFacio
+  SOURCE_BRANCH: master
+
+jobs:
+  watch:
+    name: Look for unbuilt tags and commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Trigger builds for anything new
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.FFACIO_SOURCE_TOKEN }}
+          BUILD_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 1) 릴리스가 아직 없는 v* 태그를 오래된 것부터 하나 처리합니다.
+          #    릴리스 존재 여부만 보므로 별도 상태 저장이 필요 없습니다.
+          PENDING_TAG=""
+          while read -r TAG; do
+            [ -n "$TAG" ] || continue
+            if ! gh release view "$TAG" -R "$BUILD_REPO" >/dev/null 2>&1; then
+              PENDING_TAG="$TAG"
+              break
+            fi
+          done < <(gh api "repos/${SOURCE_REPO}/git/matching-refs/tags/v" \
+                     --jq '.[].ref | sub("^refs/tags/"; "")')
+
+          if [ -n "$PENDING_TAG" ]; then
+            echo "릴리스가 없는 태그를 찾았습니다: $PENDING_TAG"
+            gh workflow run "Build and release FFacio APKs" \
+              -R "$BUILD_REPO" \
+              -f ref="$PENDING_TAG" \
+              -f release_tag="$PENDING_TAG"
+            echo "빌드와 릴리스를 요청했습니다."
+            exit 0
+          fi
+
+          # 2) 태그 작업이 없으면 기본 브랜치의 새 커밋을 확인합니다.
+          #    마지막으로 빌드한 커밋은 저장소 변수에 기록합니다.
+          HEAD_SHA="$(gh api "repos/${SOURCE_REPO}/commits/${SOURCE_BRANCH}" --jq '.sha')"
+          LAST_SHA="$(gh variable get FFACIO_LAST_BUILT_SHA -R "$BUILD_REPO" 2>/dev/null || echo '')"
+
+          if [ "$HEAD_SHA" = "$LAST_SHA" ]; then
+            echo "새 작업이 없습니다. (${SOURCE_BRANCH} @ ${HEAD_SHA})"
+            exit 0
+          fi
+
+          echo "새 커밋을 찾았습니다: $HEAD_SHA (이전: ${LAST_SHA:-없음})"
+          gh workflow run "Build and release FFacio APKs" \
+            -R "$BUILD_REPO" \
+            -f ref="$HEAD_SHA" \
+            -f release_tag=""
+
+          # 빌드 요청 후 기록합니다. 빌드가 실패해도 같은 커밋을 반복 요청하지
+          # 않도록 하기 위해서이며, 실패한 커밋은 수동 실행으로 다시 빌드합니다.
+          gh variable set FFACIO_LAST_BUILT_SHA -R "$BUILD_REPO" --body "$HEAD_SHA"
+          echo "검증 빌드를 요청했습니다."
