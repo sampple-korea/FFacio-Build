@@ -1,0 +1,297 @@
+name: Build and release FFacio APKs
+
+# 비공개 소스 저장소(sampple-korea/FFacio)를 체크아웃해서
+# FFacio, ITSOKEY Runtime, Face Runtime, Runtime Demo APK를 한 번에 빌드하고
+# 태그가 지정되면 이 공개 저장소의 릴리스로 발행합니다.
+#
+# 공개 저장소에서 실행하므로 GitHub Actions 사용 시간이 무료입니다.
+# 소스는 러너 안에서만 사용하고 산출물에는 포함하지 않습니다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '빌드할 소스 ref (브랜치, 태그, 커밋 SHA)'
+        required: false
+        default: master
+      release_tag:
+        description: '릴리스로 발행할 태그. 비우면 릴리스 없이 워크플로 아티팩트만 남깁니다.'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [ffacio-source-push]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ffacio-build
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: sampple-korea/FFacio
+  EXPECTED_SIGNER_SHA256: e1344975a288ec785ab12841ca8719b2115eadf41ae6f6e7ab8770979b7fa2b9
+
+jobs:
+  build:
+    name: Build every FFacio APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Resolve source ref and release tag
+        id: params
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.event.client_payload.ref }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          REF="${DISPATCH_REF:-${INPUT_REF:-master}}"
+          TAG="${DISPATCH_TAG:-${INPUT_TAG:-}}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "소스 ref: $REF"
+          echo "릴리스 태그: ${TAG:-(없음)}"
+
+      - name: Check out the private FFacio source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ steps.params.outputs.ref }}
+          token: ${{ secrets.FFACIO_SOURCE_TOKEN }}
+          path: source
+          persist-credentials: false
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+        with:
+          build-root-directory: source
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # --- 소스 계약 검증: 통합 전 세 저장소가 각각 수행하던 검사를 모두 실행합니다 ---
+      - name: Verify FFacio source contract
+        working-directory: source
+        run: python3 scripts/verify_source_static.py
+
+      - name: Verify ITSOKEY integration in FFacio
+        working-directory: source
+        run: python3 scripts/verify_itsokey_integration.py
+
+      - name: Verify reconstructed ITSOKEY Runtime protocol
+        working-directory: source
+        run: python3 scripts/verify_itsokey_runtime_source.py
+
+      - name: Verify FFacio and Runtime Demo alignment
+        working-directory: source
+        run: python3 scripts/verify_runtime_demo_alignment.py
+
+      - name: Restore the shared signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FFACIO_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/ffacio-signing.p12"
+          chmod 600 "$RUNNER_TEMP/ffacio-signing.p12"
+          keytool -list -v \
+            -keystore "$RUNNER_TEMP/ffacio-signing.p12" \
+            -storetype PKCS12 \
+            -storepass "$STORE_PASSWORD" \
+            -alias "$KEY_ALIAS" > "$RUNNER_TEMP/signing-certificate.txt"
+          echo "서명 인증서를 복원했습니다."
+
+      # --- 단위 테스트와 전체 빌드: 네 APK와 두 클라이언트 AAR을 한 번에 만듭니다 ---
+      - name: Run unit tests
+        working-directory: source
+        env:
+          FFACIO_KEYSTORE_PATH: ${{ runner.temp }}/ffacio-signing.p12
+          FFACIO_KEYSTORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
+          FFACIO_KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
+          FFACIO_KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
+          FFACIO_KEYSTORE_TYPE: PKCS12
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon clean :app:testDebugUnitTest :itsokey-runtime:testDebugUnitTest --stacktrace
+
+      - name: Build debug APKs
+        working-directory: source
+        env:
+          FFACIO_KEYSTORE_PATH: ${{ runner.temp }}/ffacio-signing.p12
+          FFACIO_KEYSTORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
+          FFACIO_KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
+          FFACIO_KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
+          FFACIO_KEYSTORE_TYPE: PKCS12
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon \
+            :app:assembleDebug \
+            :itsokey-runtime:assembleDebug \
+            :face-runtime:assembleDebug \
+            :runtime-demo:assembleDebug \
+            --stacktrace
+
+      - name: Build signed release APKs and client AARs
+        working-directory: source
+        env:
+          FFACIO_KEYSTORE_PATH: ${{ runner.temp }}/ffacio-signing.p12
+          FFACIO_KEYSTORE_PASSWORD: ${{ secrets.FFACIO_KEYSTORE_PASSWORD }}
+          FFACIO_KEY_ALIAS: ${{ secrets.FFACIO_KEY_ALIAS }}
+          FFACIO_KEY_PASSWORD: ${{ secrets.FFACIO_KEY_PASSWORD }}
+          FFACIO_KEYSTORE_TYPE: PKCS12
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon \
+            :app:assembleRelease \
+            :itsokey-runtime:assembleRelease \
+            :face-runtime:assembleRelease \
+            :runtime-demo:assembleRelease \
+            :runtime-client:assembleRelease \
+            :itsokey-client:assembleRelease \
+            --stacktrace
+
+      # --- 패키지 역할과 동일 인증서 서명 검증 ---
+      - name: Verify package roles and shared signature
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          AAPT="$BUILD_TOOLS/aapt"
+          test -x "$APKSIGNER"
+          if [ ! -x "$AAPT" ]; then AAPT="$BUILD_TOOLS/aapt2"; fi
+          test -x "$AAPT"
+
+          FFACIO_APK=app/build/outputs/apk/release/app-release.apk
+          ITSOKEY_APK=itsokey-runtime/build/outputs/apk/release/itsokey-runtime-release.apk
+          RUNTIME_APK=face-runtime/build/outputs/apk/release/face-runtime-release.apk
+          DEMO_APK=runtime-demo/build/outputs/apk/release/runtime-demo-release.apk
+
+          mkdir -p ../reports
+          for APK in "$FFACIO_APK" "$ITSOKEY_APK" "$RUNTIME_APK" "$DEMO_APK"; do
+            test -f "$APK" || { echo "APK가 없습니다: $APK"; exit 1; }
+          done
+
+          "$APKSIGNER" verify --verbose --print-certs "$FFACIO_APK"  | tee ../reports/ffacio-signature.txt
+          "$APKSIGNER" verify --verbose --print-certs "$ITSOKEY_APK" | tee ../reports/itsokey-signature.txt
+          "$APKSIGNER" verify --verbose --print-certs "$RUNTIME_APK" | tee ../reports/face-runtime-signature.txt
+          "$APKSIGNER" verify --verbose --print-certs "$DEMO_APK"    | tee ../reports/runtime-demo-signature.txt
+
+          "$AAPT" dump badging "$FFACIO_APK"  | tee ../reports/ffacio-badging.txt
+          "$AAPT" dump badging "$ITSOKEY_APK" | tee ../reports/itsokey-badging.txt
+          "$AAPT" dump badging "$RUNTIME_APK" | tee ../reports/face-runtime-badging.txt
+          "$AAPT" dump badging "$DEMO_APK"    | tee ../reports/runtime-demo-badging.txt
+
+          # 패키지 역할 계약
+          grep -q "package: name='com.ffacio.mobile'" ../reports/ffacio-badging.txt
+          grep -q "launchable-activity: name='com.ffacio.mobile.MainActivity'" ../reports/ffacio-badging.txt
+          grep -q "package: name='io.ffacio.itsokeyruntime'" ../reports/itsokey-badging.txt
+          grep -q "launchable-activity: name='io.ffacio.itsokeyruntime.MainActivity'" ../reports/itsokey-badging.txt
+          grep -q "package: name='io.ffacio.demo'" ../reports/runtime-demo-badging.txt
+          grep -q "launchable-activity: name='io.ffacio.demo.MainActivity'" ../reports/runtime-demo-badging.txt
+          # Face Runtime은 서비스 전용 APK입니다. 런처 Activity가 있으면 실패입니다.
+          grep -q "package: name='com.kbyai.faceattribute'" ../reports/face-runtime-badging.txt
+          ! grep -q 'launchable-activity:' ../reports/face-runtime-badging.txt
+
+          # signature 보호 Binder 권한 때문에 네 APK는 모두 같은 인증서여야 합니다.
+          for REPORT in ../reports/ffacio-signature.txt ../reports/itsokey-signature.txt \
+                        ../reports/face-runtime-signature.txt ../reports/runtime-demo-signature.txt; do
+            SHA="$(sed -n 's/^.*certificate SHA-256 digest: //p' "$REPORT" | head -n 1 | tr -d '[:space:]')"
+            test -n "$SHA"
+            if [ "$SHA" != "$EXPECTED_SIGNER_SHA256" ]; then
+              echo "서명 인증서가 다릅니다: $REPORT -> $SHA (기대값 $EXPECTED_SIGNER_SHA256)"
+              exit 1
+            fi
+          done
+          printf 'Shared signer SHA-256: %s\n' "$EXPECTED_SIGNER_SHA256" | tee ../reports/shared-signature.txt
+
+      - name: Collect release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          S=source
+
+          cp "$S/app/build/outputs/apk/release/app-release.apk"                         artifacts/FFacio-release.apk
+          cp "$S/itsokey-runtime/build/outputs/apk/release/itsokey-runtime-release.apk"  artifacts/ITSOKEY-Runtime-release.apk
+          cp "$S/face-runtime/build/outputs/apk/release/face-runtime-release.apk"        artifacts/FFacio-Face-Runtime-release.apk
+          cp "$S/runtime-demo/build/outputs/apk/release/runtime-demo-release.apk"        artifacts/FFacio-Runtime-Demo-release.apk
+
+          cp "$S/app/build/outputs/apk/debug/app-debug.apk"                              artifacts/FFacio-debug.apk
+          cp "$S/itsokey-runtime/build/outputs/apk/debug/itsokey-runtime-debug.apk"      artifacts/ITSOKEY-Runtime-debug.apk
+          cp "$S/face-runtime/build/outputs/apk/debug/face-runtime-debug.apk"            artifacts/FFacio-Face-Runtime-debug.apk
+          cp "$S/runtime-demo/build/outputs/apk/debug/runtime-demo-debug.apk"            artifacts/FFacio-Runtime-Demo-debug.apk
+
+          cp "$S/runtime-client/build/outputs/aar/runtime-client-release.aar"            artifacts/FFacio-Runtime-client-release.aar
+          cp "$S/itsokey-client/build/outputs/aar/itsokey-client-release.aar"            artifacts/ITSOKEY-Runtime-client-release.aar
+
+          cp reports/*.txt artifacts/
+          cp "$RUNNER_TEMP/signing-certificate.txt" artifacts/
+
+          # 소스는 비공개 저장소에만 둡니다. 공개 릴리스에는 소스 ZIP을 넣지 않습니다.
+          (cd artifacts && sha256sum * > SHA256SUMS.txt)
+          ls -lh artifacts
+
+      - name: Upload build bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFacio-signed-build
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: steps.params.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.params.outputs.tag }}
+          SOURCE_SHA: ${{ steps.params.outputs.ref }}
+        run: |
+          set -euo pipefail
+          {
+            echo "FFacio 통합 빌드 \`$TAG\`"
+            echo
+            echo "소스: \`$SOURCE_REPO\` @ \`$SOURCE_SHA\` (비공개 저장소)"
+            echo
+            echo "| APK | 패키지 | 역할 |"
+            echo "| --- | --- | --- |"
+            echo "| FFacio-release.apk | \`com.ffacio.mobile\` | 출입 인증 본체 |"
+            echo "| ITSOKEY-Runtime-release.apk | \`io.ffacio.itsokeyruntime\` | 도어락 세션·제어 Runtime |"
+            echo "| FFacio-Face-Runtime-release.apk | \`com.kbyai.faceattribute\` | 얼굴 엔진 Runtime (런처 없음) |"
+            echo "| FFacio-Runtime-Demo-release.apk | \`io.ffacio.demo\` | Runtime 점검용 데모 |"
+            echo
+            echo "설치 순서: Face Runtime → ITSOKEY Runtime → FFacio."
+            echo "네 APK는 signature 보호 Binder 권한 때문에 모두 같은 인증서로 서명되어 있습니다."
+            echo
+            echo "서명 인증서 SHA-256: \`$EXPECTED_SIGNER_SHA256\`"
+          } > release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" artifacts/* --title "FFacio $TAG" --notes-file release-notes.md
+          fi
