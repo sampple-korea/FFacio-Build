@@ -34,7 +34,12 @@ Face Runtime은 런처 아이콘이 없습니다. 설치 후 홈 화면에 나�
 
 ### 자동
 
-비공개 저장소의 `master`에 push하면 빌드가, `v*` 태그를 push하면 빌드와 릴리스 발행이 자동으로 실행됩니다.
+`watch-source.yml`이 15분마다 비공개 저장소를 확인합니다.
+
+- 릴리스가 아직 없는 `v*` 태그를 찾으면 → 빌드하고 이 저장소의 릴리스로 발행합니다.
+- 태그 작업이 없고 `master`에 새 커밋이 있으면 → 검증 빌드만 수행합니다.
+
+감시를 비공개 저장소가 아니라 여기서 하는 이유는, 비공개 저장소의 Actions가 요금제 한도에 묶여 몇 초짜리 잡조차 실행되지 않기 때문입니다. 공개 저장소는 Actions가 무료입니다. GitHub 부하에 따라 예약 실행은 15분보다 늦어질 수 있으므로, 급하면 아래 수동 실행을 쓰세요.
 
 ### 수동
 
@@ -45,7 +50,14 @@ Actions 탭에서 **Build and release FFacio APKs**를 `Run workflow`로 실행�
 | `ref` | 빌드할 소스 ref. 브랜치, 태그, 커밋 SHA 모두 가능합니다. 기본값 `master` |
 | `release_tag` | 릴리스로 발행할 태그. 비우면 워크플로 아티팩트만 남기고 릴리스는 만들지 않습니다 |
 
-## 워크플로가 하는 일
+## 워크플로
+
+| 워크플로 | 트리거 | 역할 |
+| --- | --- | --- |
+| `watch-source.yml` | 15분 주기 / 수동 | 비공개 저장소의 새 태그·커밋 감지 후 빌드 요청 |
+| `build-and-release.yml` | 수동 / `watch-source.yml` | 실제 빌드, 검증, 릴리스 발행 |
+
+## build-and-release.yml이 하는 일
 
 통합 이전 세 저장소의 워크플로(`build-app-apk.yml`, `build-runtime-apk.yml`, `android.yml`, `android-ci.yml`)가 하던 검사를 하나로 합쳐 모두 수행합니다.
 
@@ -66,7 +78,7 @@ Actions 탭에서 **Build and release FFacio APKs**를 `Run workflow`로 실행�
 
 | 이름 | 용도 |
 | --- | --- |
-| `FFACIO_SOURCE_TOKEN` | 비공개 소스 저장소 체크아웃용 PAT (Contents: read) |
+| `FFACIO_SOURCE_TOKEN` | 비공개 소스 저장소를 읽고 빌드를 요청할 PAT (Contents: read, Actions: write) |
 | `FFACIO_KEYSTORE_BASE64` | PKCS#12 서명키를 base64로 인코딩한 값 |
 | `FFACIO_KEYSTORE_PASSWORD` | 키스토어 비밀번호 |
 | `FFACIO_KEY_ALIAS` | 키 별칭 |
