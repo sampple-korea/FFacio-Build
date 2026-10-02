@@ -15,7 +15,7 @@ on:
         required: false
         default: master
       release_tag:
-        description: '릴리스로 발행할 태그. 비우면 릴리스 없이 워크플로 아티팩트만 남깁니다.'Set up Android SDK
+        description: '릴리스로 발행할 태그. 비우면 릴리스 없이 워크플로 아티팩트만 남깁니다.'
         required: false
         default: ''
   repository_dispatch:
