@@ -15,7 +15,7 @@ on:
         required: false
         default: master
       release_tag:
-        description: '릴리스로 발행할 태그. 비우면 릴리스 없이 워크플로 아티팩트만 남깁니다.'
+        description: '릴리스로 발행할 태그. 비우면 릴리스 없이 워크플로 아티팩트만 남깁니다.'Set up Android SDK
         required: false
         default: ''
   repository_dispatch:
@@ -93,9 +93,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
