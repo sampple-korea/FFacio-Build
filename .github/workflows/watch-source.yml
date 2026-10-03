@@ -40,22 +40,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) 릴리스가 아직 없는 v* 태그를 오래된 것부터 하나 처리합니다.
+          # 1) 릴리스가 아직 없는 v1.* 태그를 오래된 것부터 하나 처리합니다.
           #    릴리스 존재 여부만 보므로 별도 상태 저장이 필요 없습니다.
-          #    단, 빌드할 수 없는 것으로 확인된 태그는 건너뜁니다.
-                              #    (예: v0.2.0 - 옛날 소스 구조라 검증 스크립트가 없어서 빌드 불가)
-                                        SKIP_TAGS="v0.2.0"
+          #    v0.x 태그는 옛날 소스 구조라 검증 스크립트가 없어 빌드할 수 없으므로 대상에서 뺍니다.
           PENDING_TAG=""
           while read -r TAG; do
             [ -n "$TAG" ] || continue
-                        case " $SKIP_TAGS " in
-                                      *" $TAG "*) echo "건너뜁니다 (빌드 불가 태그): $TAG"; continue;;
-                                                  esac
             if ! gh release view "$TAG" -R "$BUILD_REPO" >/dev/null 2>&1; then
               PENDING_TAG="$TAG"
               break
             fi
-          done < <(gh api "repos/${SOURCE_REPO}/git/matching-refs/tags/v" \
+          done < <(gh api "repos/${SOURCE_REPO}/git/matching-refs/tags/v1" \
                      --jq '.[].ref | sub("^refs/tags/"; "")')
 
           if [ -n "$PENDING_TAG" ]; then
